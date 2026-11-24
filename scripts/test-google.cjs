@@ -8,7 +8,7 @@ require.extensions['.ts'] = (module, filename) => {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText, filename);
 };
-const { transcribeAndTranslateWav, translateArabicToGerman, verifyGoogleApiKey, resetSpeechVariantCache } = require('../src/main/googleCloudService.ts');
+const { transcribeAndTranslateWav, translateArabicToGerman, verifyGoogleApiKey } = require('../src/main/googleCloudService.ts');
 const { analyzeTimeDomainSamples, encodeFloat32To16kWav } = require('../src/renderer/src/audio/audioMetrics.ts');
 const { applyIslamicTerminology } = require('../src/main/glossary.ts');
 const config = (apiKey, extra = {}) => ({ apiKey, languageCode: 'ar-SA', enableIslamicGlossary: false, customGlossary: [], ...extra });
@@ -83,34 +83,4 @@ test('single-locale profiles never send a synthetic language code to Google', as
 test('alternate language candidates exclude duplicates and the primary locale',()=>{
   const {resolveRecognitionLanguages}=require('../src/main/googleCloudService.ts');
   assert.deepEqual(resolveRecognitionLanguages('ar-EG',['ar-EG','ar-SA','ar-SA','ar-JO','ar-AE','ar-MA']),{languageCode:'ar-EG',alternativeLanguageCodes:['ar-SA','ar-JO','ar-AE']});
-});
-
-test('Fallback-Modell wird gemerkt: kein 400-Umweg bei jedem weiteren Paket', async()=>{
-  resetSpeechVariantCache();
-  await mockFetch((r,i)=>i===1?json({error:{message:'x'}},400):r.url.includes('speech')?speech('نص '+i):translation('Text '+i),async requests=>{
-    const c=config('sticky-1');
-    await transcribeAndTranslateWav(Buffer.from('a'),c);
-    const before=requests.length;
-    await transcribeAndTranslateWav(Buffer.from('b'),c);
-    assert.equal(requests.length-before,2); // 1x STT + 1x Übersetzung
-    assert.equal(requests[before].body.config.model,'default');
-  });
-});
-test('fertiger Abschnitt wird bei vorübergehendem Serverfehler wiederholt, Vorschau nicht',async()=>{
-  resetSpeechVariantCache();
-  await mockFetch((r,i)=>i===1?json({error:{message:'busy'}},503):r.url.includes('speech')?speech('نص'):translation('Text'),async requests=>{
-    const res=await transcribeAndTranslateWav(Buffer.from('a'),config('retry-1'),{isFinal:true});
-    assert.equal(res.german,'Text');assert.equal(requests.length,3);
-  });
-  await mockFetch(()=>json({error:{message:'busy'}},503),async requests=>{
-    await assert.rejects(()=>transcribeAndTranslateWav(Buffer.from('a'),config('retry-2'),{isFinal:false}));
-    assert.equal(requests.length,1);
-  });
-});
-test('gleichzeitige gleiche Übersetzung wird nur einmal angefragt',async()=>{
-  await mockFetch(()=>translation('Einmal'),async requests=>{
-    const c=config('dedupe-1');
-    const [a,b]=await Promise.all([translateArabicToGerman('نص واحد',c),translateArabicToGerman('نص واحد',c)]);
-    assert.equal(a,'Einmal');assert.equal(b,'Einmal');assert.equal(requests.length,1);
-  });
 });

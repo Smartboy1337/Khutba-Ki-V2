@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const updater = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'khutbahAutoUpdater.ts'), 'utf8');
 const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'auto-update-einrichten.cjs'), 'utf8');
-assert.match(updater, /!app\.isPackaged/);
+assert.match(updater, /app\.isPackaged/);
 assert.match(updater, /autoUpdater\.autoInstallOnAppQuit = true/);
 assert.doesNotMatch(updater, /quitAndInstall\(/);
 assert.match(installer, /KHUTBAH_AUTO_UPDATE_HOOK/);

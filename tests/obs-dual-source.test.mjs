@@ -26,8 +26,8 @@ test('The UI creates independent settings and link buttons for each OBS source',
   const ui = readFileSync(new URL('../src/renderer/src/ui/App.tsx', import.meta.url), 'utf8');
   assert.match(ui, /const obsRoomUrl =/);
   assert.match(ui, /const obsStreamUrl =/);
-  assert.match(ui, /layout: 'full'/);
-  assert.match(ui, /layout: 'captions'/);
+  assert.match(ui, /layout=full/);
+  assert.match(ui, /layout=captions/);
   assert.match(ui, /obsRoomScale/);
   assert.match(ui, /obsStreamScale/);
   assert.match(ui, /Raum-Link kopieren/);

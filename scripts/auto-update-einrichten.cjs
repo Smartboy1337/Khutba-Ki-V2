@@ -31,7 +31,7 @@ fs.copyFileSync(mainPath, path.join(backupDir, 'index.ts'));
 if (fs.existsSync(updaterPath)) fs.copyFileSync(updaterPath, path.join(backupDir, 'khutbahAutoUpdater.ts'));
 
 const importLine = "import { startKhutbahAutoUpdates } from './khutbahAutoUpdater';";
-if (!main.includes(importLine)) main = importLine + '\n' + main;
+if (!/from ['"]\.\/khutbahAutoUpdater['"]/.test(main)) main = importLine + '\n' + main;
 const marker = '  startKhutbahAutoUpdates(); // KHUTBAH_AUTO_UPDATE_HOOK';
 if (!main.includes('KHUTBAH_AUTO_UPDATE_HOOK')) {
   const pattern = /app\.whenReady\(\)\.then\(\(\)\s*=>\s*\{/;
@@ -50,7 +50,7 @@ pkg.build.win.target = [
 pkg.build.nsis = {
   oneClick: false,
   perMachine: false,
-  allowToChangeInstallationDirectory: false,
+  allowToChangeInstallationDirectory: true,
   createDesktopShortcut: true,
   createStartMenuShortcut: true
 };

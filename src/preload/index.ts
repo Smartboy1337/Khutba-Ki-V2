@@ -28,7 +28,24 @@ export interface ProjectorPayload {
   backgroundColor: string;
 }
 
+export interface UpdateStatus {
+  version: string;
+  phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'development';
+  message: string;
+  progress: number | null;
+  availableVersion: string | null;
+  lastCheckedAt: string | null;
+  installOnQuit: boolean;
+}
+
 contextBridge.exposeInMainWorld('khutbah', {
+  getUpdateStatus: () => ipcRenderer.invoke('updater:getStatus'),
+  checkForUpdates: () => ipcRenderer.invoke('updater:checkNow'),
+  onUpdateStatus: (callback: (status: UpdateStatus) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: UpdateStatus) => callback(status);
+    ipcRenderer.on('updater:status', listener);
+    return () => ipcRenderer.removeListener('updater:status', listener);
+  },
   getObsUrl: () => ipcRenderer.invoke('obs:getUrl'),
   copyObsUrl: (url?: string) => ipcRenderer.invoke('obs:copyUrl', url),
   listDisplays: () => ipcRenderer.invoke('displays:list'),
@@ -62,8 +79,6 @@ contextBridge.exposeInMainWorld('khutbah', {
   },
 
   loadSettings: () => ipcRenderer.invoke('settings:load'),
-  updateSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:update', settings),
-  setKeepAwake: (active: boolean) => ipcRenderer.invoke('power:keepAwake', active),
   saveSettings: (settings: {
     apiKey: string;
     languageCode: string;

@@ -9,7 +9,7 @@ echo        KHUTBAH AI - UPDATE VERTEILEN
 echo.
 if not exist "package.json" goto :failure
 where npm.cmd >nul 2>&1 || goto :failure
-node.exe -e "const p=require('./package.json');if(!p.build||!p.build.publish||!p.dependencies['electron-updater'])process.exit(1);console.log('Aktuelle Projektversion:',p.version);console.log('Repository:',p.build.publish[0].owner+'/'+p.build.publish[0].repo);"
+node.exe -e "const p=require('./package.json');if(!p.build||!p.build.publish||!p.dependencies['electron-updater']||p.build.publish[0].owner==='DEIN_GITHUB_NAME'||p.build.publish[0].repo==='DEIN_REPOSITORY')process.exit(1);console.log('Aktuelle Projektversion:',p.version);console.log('Repository:',p.build.publish[0].owner+'/'+p.build.publish[0].repo);"
 if errorlevel 1 goto :failure
 echo.
 echo Die Versionsnummer muss bei JEDEM neuen Update hoeher sein.
@@ -27,6 +27,10 @@ if errorlevel 1 goto :failure
 echo.
 echo Windows-Update-Installer bauen...
 call npm.cmd run package:update:win
+if errorlevel 1 goto :failure
+echo.
+echo Versionsnummer und GUI im fertigen Build pruefen...
+node.exe scripts\verify-release.cjs
 if errorlevel 1 goto :failure
 if not exist "dist-exe\latest.yml" (
   echo FEHLER: latest.yml fehlt. Update kann nicht verteilt werden.

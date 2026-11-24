@@ -4,16 +4,16 @@ import { readFileSync } from 'node:fs';
 
 const ui = readFileSync(new URL('../src/renderer/src/ui/App.tsx', import.meta.url), 'utf8');
 
-test('room source uses the /obs endpoint in full layout', () => {
-  assert.match(ui, /const obsRoomUrl = .*buildObsUrl\(obsUrl, \{ layout: 'full'/);
+test('room source uses proven /obs endpoint in full layout', () => {
+  assert.match(ui, /const obsRoomUrl = .*layout=full/);
 });
 
-test('livestream source uses the same /obs endpoint with caption layout', () => {
-  const block = ui.slice(ui.indexOf('const obsStreamUrl ='), ui.indexOf('const visibleText'));
-  assert.match(block, /buildObsUrl\(obsUrl/);
-  assert.match(block, /layout: 'captions'/);
-  assert.match(block, /mode: 'de'/);
-  assert.doesNotMatch(block, /'\/captions'/);
+test('livestream source uses the same proven /obs endpoint with caption layout', () => {
+  const line = ui.split('\n').find(s => s.includes('const obsStreamUrl ='));
+  assert.ok(line);
+  assert.match(line, /replace\(\/\\\/obs\$\/, '\/obs'\)/);
+  assert.match(line, /\?layout=captions&mode=de/);
+  assert.doesNotMatch(line, /'\/captions'/);
 });
 
 test('each source has own copy button and scale', () => {

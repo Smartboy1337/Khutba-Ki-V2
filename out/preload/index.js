@@ -1,6 +1,13 @@
 "use strict";
 const electron = require("electron");
 electron.contextBridge.exposeInMainWorld("khutbah", {
+  getUpdateStatus: () => electron.ipcRenderer.invoke("updater:getStatus"),
+  checkForUpdates: () => electron.ipcRenderer.invoke("updater:checkNow"),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    electron.ipcRenderer.on("updater:status", listener);
+    return () => electron.ipcRenderer.removeListener("updater:status", listener);
+  },
   getObsUrl: () => electron.ipcRenderer.invoke("obs:getUrl"),
   copyObsUrl: (url) => electron.ipcRenderer.invoke("obs:copyUrl", url),
   listDisplays: () => electron.ipcRenderer.invoke("displays:list"),
@@ -25,8 +32,6 @@ electron.contextBridge.exposeInMainWorld("khutbah", {
     return () => electron.ipcRenderer.removeListener("displays:changed", listener);
   },
   loadSettings: () => electron.ipcRenderer.invoke("settings:load"),
-  updateSettings: (settings) => electron.ipcRenderer.invoke("settings:update", settings),
-  setKeepAwake: (active) => electron.ipcRenderer.invoke("power:keepAwake", active),
   saveSettings: (settings) => electron.ipcRenderer.invoke("settings:save", settings),
   verifyApiKey: (apiKey) => electron.ipcRenderer.invoke("cloud:verifyKey", apiKey),
   processAudioSegment: (wavArrayBuffer, meta) => electron.ipcRenderer.invoke("cloud:processAudioSegment", wavArrayBuffer, meta),

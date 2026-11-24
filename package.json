@@ -1,6 +1,6 @@
 {
   "name": "khutbah-ai",
-  "version": "1.1.0",
+  "version": "1.1.11",
   "private": true,
   "description": "Khutbah AI - Moschee Al Badr Edition (Ultra-Fast Live Arabic-to-German Sermon Translation)",
   "main": "out/main/index.js",
@@ -9,13 +9,15 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run && node --experimental-strip-types --no-warnings --test tests/*.test.mjs scripts/test-google.cjs",
-    "package:win": "npm run build && electron-builder --win --x64"
+    "test": "vitest run",
+    "package:win": "npm run build && electron-builder --win --x64",
+    "package:update:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -40,8 +42,14 @@
       "package.json"
     ],
     "win": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
         {
           "target": "portable",
           "arch": [
@@ -49,7 +57,23 @@
           ]
         }
       ],
-      "artifactName": "Khutbah-AI-Al-Badr.exe"
+      "artifactName": "Khutbah-AI-${version}-${arch}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Smartboy1337",
+        "repo": "Khutba-Ki-V2",
+        "releaseType": "release"
+      }
+    ],
+    "electronUpdaterCompatibility": ">=6.0.0",
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

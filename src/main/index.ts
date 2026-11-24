@@ -1,15 +1,13 @@
-import { app, BrowserWindow, clipboard, ipcMain, net, powerSaveBlocker, safeStorage, screen, session } from 'electron';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { startKhutbahAutoUpdates, checkKhutbahUpdates, getKhutbahUpdateStatus } from './khutbahAutoUpdater';
+import { app, BrowserWindow, clipboard, ipcMain, safeStorage, screen, session } from 'electron';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_ISLAMIC_GLOSSARY, type GlossaryRule } from './glossary';
 import { ObsOverlayServer } from './obsOverlay';
-import { sanitizeObsUrl } from '../shared/obsUrl';
 import {
-  setFetchImplementation,
   transcribeAndTranslateWav,
   translateArabicToGerman,
   verifyGoogleApiKey,
-  warmUpGoogleConnections,
   type CloudTranslationConfig
 } from './googleCloudService';
 
@@ -66,100 +64,81 @@ let latestPayload: ProjectorPayload = {
   backgroundColor: '#030304'
 };
 
-interface AppSettings {
+function getSettingsFilePath(): string {
+  return join(app.getPath('userData'), 'khutbah-ai-settings.json');
+}
+
+function loadSettings(): {
   apiKey: string;
   languageCode: string;
   enableIslamicGlossary: boolean;
   customGlossary: GlossaryRule[];
   visibleBlockCount: number;
   chunkIntervalMs: number;
-}
-
-const DEFAULT_SETTINGS: AppSettings = {
-  apiKey: '',
-  languageCode: 'ar-SA',
-  enableIslamicGlossary: true,
-  customGlossary: DEFAULT_ISLAMIC_GLOSSARY,
-  visibleBlockCount: 5,
-  chunkIntervalMs: 1200
-};
-
-// Einstellungen werden EINMAL geladen und im Speicher gehalten. Früher wurde die Datei
-// bei jedem Audio-Paket gelesen und der Schlüssel entschlüsselt.
-let settingsCache: AppSettings | null = null;
-
-function getSettingsFilePath(): string {
-  return join(app.getPath('userData'), 'khutbah-ai-settings.json');
-}
-
-function readSettingsFromDisk(): AppSettings {
+} {
   const file = getSettingsFilePath();
-  if (!existsSync(file)) return { ...DEFAULT_SETTINGS };
+  if (!existsSync(file)) {
+    return {
+      apiKey: '',
+      languageCode: 'ar-SA',
+      enableIslamicGlossary: true,
+      customGlossary: DEFAULT_ISLAMIC_GLOSSARY,
+      visibleBlockCount: 5,
+      chunkIntervalMs: 1200
+    };
+  }
   try {
     const raw = JSON.parse(readFileSync(file, 'utf-8')) as PersistedSettings;
     let apiKey = '';
-    try {
-      if (raw.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
-        apiKey = safeStorage.decryptString(Buffer.from(raw.encryptedApiKey, 'base64'));
-      } else if (raw.plainApiKey) {
-        apiKey = raw.plainApiKey;
-      }
-    } catch (error) {
-      console.error('API-Schlüssel konnte nicht entschlüsselt werden:', error);
+    if (raw.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
+      apiKey = safeStorage.decryptString(Buffer.from(raw.encryptedApiKey, 'base64'));
+    } else if (raw.plainApiKey) {
+      apiKey = raw.plainApiKey;
     }
     return {
       apiKey,
       languageCode: raw.languageCode || 'ar-SA',
       enableIslamicGlossary: raw.enableIslamicGlossary ?? true,
-      customGlossary: Array.isArray(raw.customGlossary) ? raw.customGlossary : DEFAULT_ISLAMIC_GLOSSARY,
+      customGlossary: raw.customGlossary ?? DEFAULT_ISLAMIC_GLOSSARY,
       visibleBlockCount: raw.visibleBlockCount ?? 5,
       chunkIntervalMs: raw.chunkIntervalMs ?? 1200
     };
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return {
+      apiKey: '',
+      languageCode: 'ar-SA',
+      enableIslamicGlossary: true,
+      customGlossary: DEFAULT_ISLAMIC_GLOSSARY,
+      visibleBlockCount: 5,
+      chunkIntervalMs: 1200
+    };
   }
 }
 
-function loadSettings(): AppSettings {
-  if (!settingsCache) settingsCache = readSettingsFromDisk();
-  return settingsCache;
-}
-
-function writeSettingsToDisk(settings: AppSettings) {
+function saveSettings(input: {
+  apiKey: string;
+  languageCode: string;
+  enableIslamicGlossary: boolean;
+  customGlossary: GlossaryRule[];
+  visibleBlockCount?: number;
+  chunkIntervalMs?: number;
+}) {
   const file = getSettingsFilePath();
   const data: PersistedSettings = {
-    languageCode: settings.languageCode,
-    enableIslamicGlossary: settings.enableIslamicGlossary,
-    customGlossary: settings.customGlossary,
-    visibleBlockCount: settings.visibleBlockCount,
-    chunkIntervalMs: settings.chunkIntervalMs
+    languageCode: input.languageCode,
+    enableIslamicGlossary: input.enableIslamicGlossary,
+    customGlossary: input.customGlossary,
+    visibleBlockCount: input.visibleBlockCount ?? 5,
+    chunkIntervalMs: input.chunkIntervalMs ?? 1200
   };
-  if (settings.apiKey.trim()) {
+  if (input.apiKey.trim()) {
     if (safeStorage.isEncryptionAvailable()) {
-      data.encryptedApiKey = safeStorage.encryptString(settings.apiKey.trim()).toString('base64');
+      data.encryptedApiKey = safeStorage.encryptString(input.apiKey.trim()).toString('base64');
     } else {
-      data.plainApiKey = settings.apiKey.trim();
+      data.plainApiKey = input.apiKey.trim();
     }
   }
-  // Atomar schreiben: erst Temp-Datei, dann umbenennen. Ein Stromausfall während
-  // des Speicherns kann die Einstellungsdatei so nicht mehr zerstören.
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  renameSync(tmp, file);
-}
-
-function saveSettings(input: Partial<AppSettings>, options: { keepApiKey?: boolean } = {}) {
-  const current = loadSettings();
-  const next: AppSettings = {
-    apiKey: options.keepApiKey ? current.apiKey : String(input.apiKey ?? current.apiKey).trim(),
-    languageCode: typeof input.languageCode === 'string' && input.languageCode ? input.languageCode : current.languageCode,
-    enableIslamicGlossary: typeof input.enableIslamicGlossary === 'boolean' ? input.enableIslamicGlossary : current.enableIslamicGlossary,
-    customGlossary: Array.isArray(input.customGlossary) ? input.customGlossary : current.customGlossary,
-    visibleBlockCount: Number.isFinite(input.visibleBlockCount) ? Number(input.visibleBlockCount) : current.visibleBlockCount,
-    chunkIntervalMs: Number.isFinite(input.chunkIntervalMs) ? Number(input.chunkIntervalMs) : current.chunkIntervalMs
-  };
-  settingsCache = next;
-  writeSettingsToDisk(next);
+  writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
 }
 
 function getDisplayList() {
@@ -183,30 +162,6 @@ function broadcastDisplays() {
   }
 }
 
-/** Lädt ein abgestürztes oder hängendes Fenster automatisch neu, statt schwarz zu bleiben. */
-function attachCrashRecovery(win: BrowserWindow, name: string) {
-  win.webContents.on('render-process-gone', (_event, details) => {
-    console.error(`${name}-Fenster abgestürzt:`, details.reason);
-    if (details.reason === 'clean-exit' || win.isDestroyed()) return;
-    setTimeout(() => {
-      if (!win.isDestroyed()) win.webContents.reload();
-    }, 500);
-  });
-  win.on('unresponsive', () => {
-    console.error(`${name}-Fenster reagiert nicht.`);
-  });
-}
-
-let powerBlockerId: number | null = null;
-function setKeepAwake(active: boolean) {
-  if (active && powerBlockerId === null) {
-    powerBlockerId = powerSaveBlocker.start('prevent-display-sleep');
-  } else if (!active && powerBlockerId !== null) {
-    powerSaveBlocker.stop(powerBlockerId);
-    powerBlockerId = null;
-  }
-}
-
 function createControlWindow() {
   controlWindow = new BrowserWindow({
     width: 1460,
@@ -219,13 +174,9 @@ function createControlWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
-      // Audio-Aufnahme & Übersetzung dürfen nicht gedrosselt werden, wenn das Fenster
-      // hinter OBS liegt oder minimiert ist.
-      backgroundThrottling: false
+      sandbox: true
     }
   });
-  attachCrashRecovery(controlWindow, 'Steuerung');
 
   if (process.env.ELECTRON_RENDERER_URL) {
     controlWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -270,11 +221,9 @@ function openProjector(displayId?: number) {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
-      backgroundThrottling: false
+      sandbox: true
     }
   });
-  attachCrashRecovery(projectorWindow, 'Beamer');
 
   if (process.env.ELECTRON_RENDERER_URL) {
     projectorWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}#/projector`);
@@ -284,7 +233,7 @@ function openProjector(displayId?: number) {
     });
   }
 
-  projectorWindow.webContents.on('did-finish-load', () => {
+  projectorWindow.webContents.once('did-finish-load', () => {
     if (projectorWindow && !projectorWindow.isDestroyed()) {
       projectorWindow.webContents.send('content:update', latestPayload);
     }
@@ -302,25 +251,10 @@ function openProjector(displayId?: number) {
   }
 }
 
-// Nur eine Instanz: verhindert doppelte Mikrofon-Aufnahme und Port-Konflikte für OBS.
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      if (controlWindow.isMinimized()) controlWindow.restore();
-      controlWindow.focus();
-    }
-  });
-}
-
 app.whenReady().then(async () => {
-  if (!gotSingleInstanceLock) return;
-  // Chromium-Netzwerkstack für Google-Anfragen (HTTP/2, Verbindungs-Wiederverwendung, Proxy).
-  setFetchImplementation((url, init) => net.fetch(url, init));
-  loadSettings();
-  void warmUpGoogleConnections();
+  startKhutbahAutoUpdates(); // KHUTBAH_AUTO_UPDATE_HOOK
+  ipcMain.handle('updater:getStatus', () => getKhutbahUpdateStatus());
+  ipcMain.handle('updater:checkNow', () => checkKhutbahUpdates());
   try {
     await obsOverlay.start();
   } catch (error) {
@@ -339,20 +273,17 @@ app.whenReady().then(async () => {
   ipcMain.handle('obs:copyUrl', (_event, requestedUrl?: string) => {
     const base = obsOverlay.getUrl();
     if (!base) return false;
-    // Alle Parameter des angezeigten Links (Layout, Größe, Zeilen, Hintergrund, Abstand)
-    // werden übernommen. Früher gingen sie verloren -> falscher Link in der Zwischenablage.
-    const clean = sanitizeObsUrl(requestedUrl, base);
-    if (!clean) return false;
     try {
-      clipboard.writeText(clean);
-      return clipboard.readText() === clean ? clean : false;
-    } catch {
-      return false;
-    }
-  });
-  ipcMain.handle('power:keepAwake', (_event, active: boolean) => {
-    setKeepAwake(Boolean(active));
-    return true;
+      const parsed = new URL(requestedUrl || base);
+      const allowed = new URL(base);
+      if (parsed.origin !== allowed.origin || parsed.pathname !== '/obs' || parsed.username || parsed.password) return false;
+      const clean = new URL(base);
+      if (parsed.searchParams.get('layout') === 'lower') clean.searchParams.set('layout','lower');
+      const scale = Number(parsed.searchParams.get('scale'));
+      if (parsed.searchParams.has('scale') && Number.isFinite(scale) && scale >= .5 && scale <= 3) clean.searchParams.set('scale',String(scale));
+      clipboard.writeText(clean.toString());
+      return true;
+    } catch { return false; }
   });
   ipcMain.handle('displays:list', () => getDisplayList());
   ipcMain.handle('content:getInitial', () => latestPayload);
@@ -380,16 +311,23 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('settings:load', () => loadSettings());
 
-  ipcMain.handle('settings:save', (_event, settings: Partial<AppSettings>) => {
-    saveSettings(settings);
-    return true;
-  });
-
-  // Automatisches Speichern von Sprache, Glossar, Tempo usw. – ohne den API-Schlüssel anzufassen.
-  ipcMain.handle('settings:update', (_event, settings: Partial<AppSettings>) => {
-    saveSettings(settings, { keepApiKey: true });
-    return true;
-  });
+  ipcMain.handle(
+    'settings:save',
+    (
+      _event,
+      settings: {
+        apiKey: string;
+        languageCode: string;
+        enableIslamicGlossary: boolean;
+        customGlossary: GlossaryRule[];
+        visibleBlockCount?: number;
+        chunkIntervalMs?: number;
+      }
+    ) => {
+      saveSettings(settings);
+      return true;
+    }
+  );
 
   ipcMain.handle('cloud:verifyKey', async (_event, apiKey: string) => {
     return verifyGoogleApiKey(apiKey);
@@ -400,18 +338,19 @@ app.whenReady().then(async () => {
     async (
       _event,
       wavArrayBuffer: ArrayBuffer,
-      meta?: { utteranceId?: number; isFinalPacket?: boolean }
+      _meta?: { utteranceId?: number; isFinalPacket?: boolean },
+      overrideConfig?: Partial<CloudTranslationConfig>
     ) => {
       const stored = loadSettings();
       const config: CloudTranslationConfig = {
-        apiKey: stored.apiKey,
-        languageCode: stored.languageCode,
-        enableIslamicGlossary: stored.enableIslamicGlossary,
-        customGlossary: stored.customGlossary
+        apiKey: overrideConfig?.apiKey ?? stored.apiKey,
+        languageCode: overrideConfig?.languageCode ?? stored.languageCode,
+        enableIslamicGlossary:
+          overrideConfig?.enableIslamicGlossary ?? stored.enableIslamicGlossary,
+        customGlossary: overrideConfig?.customGlossary ?? stored.customGlossary
       };
-      return transcribeAndTranslateWav(Buffer.from(wavArrayBuffer), config, {
-        isFinal: meta?.isFinalPacket !== false
-      });
+      const wavBuffer = Buffer.from(wavArrayBuffer);
+      return transcribeAndTranslateWav(wavBuffer, config);
     }
   );
 
@@ -439,15 +378,4 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
-  setKeepAwake(false);
-  obsOverlay.stop();
-});
-
-process.on('uncaughtException', (error) => {
-  // Ein unerwarteter Fehler darf die Live-Übersetzung nicht beenden.
-  console.error('Unerwarteter Fehler im Hauptprozess:', error);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('Unbehandelte Promise-Ablehnung:', reason);
-});
+app.on('before-quit', () => obsOverlay.stop());

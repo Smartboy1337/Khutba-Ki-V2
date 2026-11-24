@@ -27,13 +27,11 @@ import {
   Video
 } from 'lucide-react';
 import { useAudioMonitor, type SpeechChunkPacket } from '../audio/useAudioMonitor';
-import { LivePipeline } from '../pipeline/livePipeline';
-import { buildObsUrl } from '../../../shared/obsUrl';
 import albadrLogo from '../assets/albadr-logo.png';
-import type { DisplayItem, GlossaryRule, LiveTranscriptBlock, ProjectorPayload } from '../vite-env';
+import type { DisplayItem, GlossaryRule, LiveTranscriptBlock, ProjectorPayload, UpdateStatus } from '../vite-env';
 
 type Mode = 'de' | 'ar' | 'both';
-type ActiveTab = 'live' | 'settings';
+type ActiveTab = 'live' | 'settings' | 'test';
 
 function SmoothLiveText({
   text,
@@ -97,14 +95,29 @@ export default function App() {
 
   // Sitzungs- & Pipeline-Status
   const [activeTab, setActiveTab] = useState<ActiveTab>('live');
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false);
+  useEffect(() => {
+    if (isProjector) return;
+    let active = true;
+    window.khutbah.getUpdateStatus().then((next) => { if (active) setUpdateStatus(next); }).catch(() => {});
+    const unsubscribe = window.khutbah.onUpdateStatus((next) => setUpdateStatus(next));
+    return () => { active = false; unsubscribe(); };
+  }, [isProjector]);
+
+  const checkUpdatesNow = async () => {
+    setUpdateCheckBusy(true);
+    try { setUpdateStatus(await window.khutbah.checkForUpdates()); }
+    catch (error) { console.error('Update check:', error); }
+    finally { setUpdateCheckBusy(false); }
+  };
+
   const [running, setRunning] = useState<boolean>(false);
   const [paused, setPaused] = useState<boolean>(false);
   const [projectorOpen, setProjectorOpen] = useState<boolean>(false);
   const [obsUrl, setObsUrl] = useState<string | null>(null);
   const [obsError, setObsError] = useState<string | null>(null);
   const [obsCopied, setObsCopied] = useState<'room' | 'stream' | null>(null);
-  const [obsCopyError, setObsCopyError] = useState<string | null>(null);
-  const obsCopiedTimer = useRef<number | null>(null);
   const [obsRoomScale, setObsRoomScale] = useState(1);
   const [obsStreamScale, setObsStreamScale] = useState(1);
   const [obsCaptionLines, setObsCaptionLines] = useState(2);
@@ -121,7 +134,14 @@ export default function App() {
   // Mehrere fortlaufende Textblöcke für Beamer & Vorschau
   const [blocks, setBlocks] = useState<LiveTranscriptBlock[]>([]);
 
-  const queuedAtRef = useRef(0);
+  // Latest-Wins-Puffer: Verhindert Rückstau bei schnellem Sprechen!
+  const latestPacketRef = useRef<SpeechChunkPacket | null>(null);
+  const pendingFinalPacketsRef = useRef<SpeechChunkPacket[]>([]);
+  const finalProcessingRef = useRef(false);
+  const liveProcessingRef = useRef(false);
+  const newestFinalIdRef = useRef(0);
+  const queuedAtRef = useRef(new WeakMap<SpeechChunkPacket, number>());
+  const generationRef = useRef(0);
   const backlogPausedRef = useRef(false);
   const runningRef = useRef<boolean>(false);
   const pausedRef = useRef<boolean>(false);
@@ -182,56 +202,96 @@ export default function App() {
     []
   );
 
-  // Parallele Pipeline: fertige Abschnitte laufen gleichzeitig, Anzeige bleibt in Reihenfolge.
-  const pipelineRef = useRef<LivePipeline | null>(null);
-  if (!pipelineRef.current) {
-    pipelineRef.current = new LivePipeline(
-      {
-        process: (packet) =>
-          window.khutbah.processAudioSegment(packet.wavBuffer, {
-            utteranceId: packet.utteranceId,
-            isFinalPacket: packet.isFinalPacket
-          }),
-        onText: (id, arabic, german, isFinal) => {
-          if (!isFinal && (!runningRef.current || pausedRef.current)) return;
-          if (!backlogPausedRef.current) setPipelineError(null);
-          upsertTranscriptBlock(id, arabic, german, isFinal);
-        },
-        onFinalEmpty: (id) => {
-          finalizedIdsRef.current.add(id);
-          setBlocks((prev) => prev.filter((b) => b.id !== `utt-${id}`));
-        },
-        onFinalFailed: (id, err) => {
-          finalizedIdsRef.current.add(id);
-          // Letzte Vorschau bleibt sichtbar (nur Live-Punkt entfernen), statt Text zu löschen.
-          setBlocks((prev) => prev.map((b) => (b.id === `utt-${id}` ? { ...b, isLiveActive: false } : b)));
-          setPipelineError(err instanceof Error ? err.message : 'Fehler bei Live-Spracherkennung/Übersetzung.');
-        },
-        onPreviewError: (err) => {
-          setPipelineError(err instanceof Error ? err.message : 'Fehler bei Live-Spracherkennung/Übersetzung.');
-        },
-        onSuccess: (ms) => setLastLatencyMs(ms),
-        onStateChange: (state) => {
-          setPipelineBusy(state.busy);
-          if (state.pendingFinals >= 8 && !backlogPausedRef.current && runningRef.current) {
-            backlogPausedRef.current = true;
-            pausedRef.current = true;
-            setPaused(true);
-            setPipelineError('Google Cloud ist zu langsam. Aufnahme pausiert; vorhandene Abschnitte werden verarbeitet. Danach bitte Fortsetzen drücken.');
+  // Two independent lanes: one ordered final lane and one latest-only preview lane.
+  // A preview must never replace a final or jump ahead of a waiting final.
+  const processPacket = useCallback(async (packet: SpeechChunkPacket) => {
+    const generation = generationRef.current;
+    const stillCurrent = () => generation === generationRef.current && (packet.isFinalPacket || (
+      runningRef.current && !pausedRef.current && packet.utteranceId > newestFinalIdRef.current &&
+      !finalProcessingRef.current && pendingFinalPacketsRef.current.length === 0
+    ));
+    try {
+      const result = await window.khutbah.processAudioSegment(packet.wavBuffer, {
+        utteranceId: packet.utteranceId, isFinalPacket: packet.isFinalPacket
+      });
+      if (!stillCurrent()) return;
+      if (result?.arabic && result.german) {
+        if (!backlogPausedRef.current) setPipelineError(null);
+        // Include time spent waiting in the queue, not just cloud request time.
+        setLastLatencyMs(Date.now() - (queuedAtRef.current.get(packet) ?? Date.now() - result.latencyMs));
+        upsertTranscriptBlock(packet.utteranceId, result.arabic, result.german, packet.isFinalPacket);
+      } else if (packet.isFinalPacket) {
+        setBlocks(prev => prev.filter(b => b.id !== `utt-${packet.utteranceId}`));
+      }
+    } catch (err) {
+      if (!stillCurrent()) return;
+      if (packet.isFinalPacket) setBlocks(prev => prev.filter(b => b.id !== `utt-${packet.utteranceId}`));
+      setPipelineError(err instanceof Error ? err.message : 'Fehler bei Live-Spracherkennung/Übersetzung.');
+    }
+  }, [upsertTranscriptBlock]);
+
+  const drainLivePackets = useCallback(() => {
+    const updateBusy = () => setPipelineBusy(finalProcessingRef.current || liveProcessingRef.current);
+    // Start final packets immediately, even if an old preview is still in flight.
+    if (!finalProcessingRef.current && pendingFinalPacketsRef.current.length > 0) {
+      finalProcessingRef.current = true;
+      updateBusy();
+      void (async () => {
+        try {
+          while (pendingFinalPacketsRef.current.length > 0) {
+            await processPacket(pendingFinalPacketsRef.current.shift()!);
           }
+        } finally {
+          finalProcessingRef.current = false;
+          updateBusy();
+          drainLivePackets();
         }
-      },
-      { maxParallelFinals: 3 }
-    );
-  }
-  const pipeline = pipelineRef.current;
+      })();
+    }
+    // Prioritize final speech; keep only the newest unsent preview under load.
+    if (!liveProcessingRef.current && !finalProcessingRef.current && latestPacketRef.current &&
+        runningRef.current && !pausedRef.current) {
+      liveProcessingRef.current = true;
+      updateBusy();
+      const packet = latestPacketRef.current;
+      latestPacketRef.current = null;
+      void processPacket(packet).finally(() => {
+        liveProcessingRef.current = false;
+        updateBusy();
+        drainLivePackets();
+      });
+    }
+  }, [processPacket]);
 
   const handleSpeechPacketReady = useCallback(
     (packet: SpeechChunkPacket) => {
       if (!runningRef.current || pausedRef.current) return;
-      pipeline.push(packet);
+
+      queuedAtRef.current.set(packet, Date.now());
+      if (packet.isFinalPacket) {
+        newestFinalIdRef.current = Math.max(newestFinalIdRef.current, packet.utteranceId);
+        // Wenn das finale Paket desselben Satzes kommt, verwerfe älteren Zwischenstand derselben ID
+        if (latestPacketRef.current?.utteranceId === packet.utteranceId) {
+          latestPacketRef.current = null;
+        }
+        pendingFinalPacketsRef.current.push(packet);
+        // Never silently delete finished speech. In an exceptional backlog, pause capture
+        // and process all already queued final packets in order.
+        if (pendingFinalPacketsRef.current.length >= 5) {
+          latestPacketRef.current = null;
+          backlogPausedRef.current = true;
+          pausedRef.current = true;
+          setPaused(true);
+          setPipelineError('Google Cloud ist zu langsam. Aufnahme pausiert; vorhandene Abschnitte werden verarbeitet. Danach bitte Fortsetzen drücken.');
+        }
+      } else {
+        // Immer nur den aktuellsten Live-Zwischenstand halten (kein Lag!)
+        latestPacketRef.current = packet;
+      }
+
+      void drainLivePackets();
     },
-    [pipeline]
+    [drainLivePackets]
   );
 
   const audio = useAudioMonitor({
@@ -239,25 +299,9 @@ export default function App() {
     onSpeechPacketReady: handleSpeechPacketReady
   });
 
-  const { setSpeechCaptureActive } = audio;
   useEffect(() => {
-    setSpeechCaptureActive(running, paused);
-  }, [running, paused, setSpeechCaptureActive]);
-
-  // Bildschirm während der Sitzung wach halten (Standby würde Mikrofon & OBS unterbrechen).
-  useEffect(() => {
-    if (isProjector) return;
-    void window.khutbah.setKeepAwake(running);
-  }, [running, isProjector]);
-
-  // Einstellungen automatisch speichern (ohne API-Schlüssel), damit nichts verloren geht.
-  useEffect(() => {
-    if (isProjector) return;
-    const t = window.setTimeout(() => {
-      void window.khutbah.updateSettings({ languageCode, enableIslamicGlossary, visibleBlockCount, chunkIntervalMs });
-    }, 600);
-    return () => window.clearTimeout(t);
-  }, [languageCode, enableIslamicGlossary, visibleBlockCount, chunkIntervalMs, isProjector]);
+    audio.setSpeechCaptureActive(running, paused);
+  }, [running, paused, audio]);
 
   // Gespeicherte Cloud-Einstellungen laden
   useEffect(() => {
@@ -386,17 +430,8 @@ export default function App() {
   ]);
 
   // Two independently configurable OBS browser sources, sharing one Google translation stream.
-  const obsRoomUrl = obsUrl ? buildObsUrl(obsUrl, { layout: 'full', scale: obsRoomScale }) : '';
-  const obsStreamUrl = obsUrl
-    ? buildObsUrl(obsUrl, {
-        layout: 'captions',
-        mode: 'de',
-        scale: obsStreamScale,
-        captionLines: obsCaptionLines,
-        captionBg: obsCaptionBg,
-        captionBottom: obsCaptionBottom
-      })
-    : '';
+  const obsRoomUrl = obsUrl ? `${obsUrl.replace(/\/obs$/, '/obs')}?layout=full&scale=${obsRoomScale}` : '';
+  const obsStreamUrl = obsUrl ? `${obsUrl.replace(/\/obs$/, '/obs')}?layout=captions&mode=de&scale=${obsStreamScale}&captionLines=${obsCaptionLines}&captionBg=${obsCaptionBg}&captionBottom=${obsCaptionBottom}` : '';
 
   const visibleText = useMemo(
     () => ({ showAr: mode !== 'de', showDe: mode !== 'ar' }),
@@ -475,36 +510,8 @@ export default function App() {
   // =========================================================================
   const hasApiKey = apiKey.trim().length > 10;
 
-  const handleCopyObsLink = async (which: 'room' | 'stream', url: string) => {
-    let ok = false;
-    try {
-      // 1. Weg: Hauptprozess (zuverlässig, bereinigt den Link)
-      ok = Boolean(await window.khutbah.copyObsUrl(url));
-    } catch {
-      ok = false;
-    }
-    if (!ok) {
-      // 2. Weg: Browser-Zwischenablage, 3. Weg: Text im Feld markieren
-      try {
-        await navigator.clipboard.writeText(url);
-        ok = true;
-      } catch {
-        const input = document.getElementById(which === 'room' ? 'obs-room-url' : 'obs-stream-url') as HTMLInputElement | null;
-        if (input) {
-          input.focus();
-          input.select();
-          try { ok = document.execCommand('copy'); } catch { ok = false; }
-        }
-      }
-    }
-    setObsCopyError(ok ? null : 'Kopieren nicht möglich. Link im Feld markieren und mit Strg+C kopieren.');
-    setObsCopied(ok ? which : null);
-    if (obsCopiedTimer.current) window.clearTimeout(obsCopiedTimer.current);
-    if (ok) obsCopiedTimer.current = window.setTimeout(() => setObsCopied(null), 2500);
-  };
-
   const handleStartSession = async () => {
-    if (backlogPausedRef.current && pipeline.pendingFinals > 0) {
+    if (backlogPausedRef.current && (pendingFinalPacketsRef.current.length > 0 || finalProcessingRef.current)) {
       setPipelineError('Bitte warten, bis die bereits aufgenommenen Abschnitte verarbeitet sind.');
       return;
     }
@@ -527,17 +534,20 @@ export default function App() {
   const handleStopSession = () => {
     runningRef.current = false;
     pausedRef.current = false;
+    generationRef.current += 1;
     backlogPausedRef.current = false;
     setRunning(false);
     setPaused(false);
-    // Fertige Abschnitte, die schon unterwegs sind, werden noch angezeigt; nur Vorschau verwerfen.
-    pipeline.dropPreview();
+    latestPacketRef.current = null;
+    pendingFinalPacketsRef.current = [];
     audio.discardCurrentSpeechSegment();
     setBlocks((prev) => prev.filter((b) => !b.isLiveActive));
   };
 
   const handleClearScreen = () => {
-    pipeline.reset();
+    generationRef.current += 1;
+    latestPacketRef.current = null;
+    pendingFinalPacketsRef.current = [];
     audio.discardCurrentSpeechSegment();
     finalizedIdsRef.current.clear();
     setBlocks([]);
@@ -575,10 +585,11 @@ export default function App() {
     setPipelineError(null);
     setPipelineBusy(true);
     const t0 = Date.now();
+    const generation = generationRef.current;
     try {
       const sampleAr = 'بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ، الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ';
       const translated = await window.khutbah.translateText(sampleAr);
-      if (translated) {
+      if (translated && generation === generationRef.current) {
         upsertTranscriptBlock(Date.now(), sampleAr, translated, true);
         setLastLatencyMs(Date.now() - t0);
       }
@@ -652,6 +663,14 @@ export default function App() {
           {activeTab === 'settings' && <span className="nav-dot" />}
         </div>
 
+        <div
+          className={`nav-item ${activeTab === 'test' ? 'active' : ''}`}
+          onClick={() => setActiveTab('test')}
+        >
+          <RefreshCw size={18} /> Updates
+          {activeTab === 'test' && <span className="nav-dot" />}
+        </div>
+
         <div className="sidebar-bottom">
           <div className="privacy">
             <div className="privacy-dot" />
@@ -660,7 +679,9 @@ export default function App() {
               <small>Audio nur im RAM · Keine Speicherung</small>
             </div>
           </div>
-          <small className="version">IGB E.V. AL BADR · ULTRA-FAST STREAM</small>
+          <small className="version">KHUTBAH AI · v{updateStatus?.version ?? '1.1.11'} · AUTO-UPDATE</small>
+          <small style={{ color: '#e8c35b', fontWeight: 700 }}>TEST-BUILD 1.1.11 · NEUE OBERFLÄCHE</small>
+          {updateStatus?.installOnQuit && <small style={{ color: '#d4af37' }}>Update bereit – beim Beenden installieren</small>}
         </div>
       </aside>
 
@@ -671,7 +692,7 @@ export default function App() {
             <h1>
               {activeTab === 'live'
                 ? 'Live-Übersetzung (Freitagspredigt)'
-                : 'Layout, Google Cloud API & Tempo'}
+                : activeTab === 'settings' ? 'Layout, Google Cloud API & Tempo' : 'Automatische Updates'}
             </h1>
           </div>
           <div className="top-status">
@@ -1082,7 +1103,7 @@ export default function App() {
                     className="secondary-button"
                     onClick={() => {
                       pausedRef.current = true;
-                      pipeline.dropPreview();
+                      latestPacketRef.current = null;
                       setPaused(true);
                     }}
                     disabled={!running || paused}
@@ -1172,7 +1193,10 @@ export default function App() {
                         </label>
                         <label htmlFor="obs-room-url">OBS-Link Raum</label>
                         <input id="obs-room-url" className="obs-export-url" readOnly value={obsRoomUrl} onFocus={(e) => e.currentTarget.select()} />
-                        <button type="button" className="open-projector" onClick={() => handleCopyObsLink('room', obsRoomUrl)}><Copy size={16} /> {obsCopied === 'room' ? 'Raum-Link kopiert' : 'Raum-Link kopieren'}</button>
+                        <button type="button" className="open-projector" onClick={async () => {
+                          const ok = await window.khutbah.copyObsUrl(obsRoomUrl);
+                          setObsCopied(ok ? 'room' : null);
+                        }}><Copy size={16} /> {obsCopied === 'room' ? 'Raum-Link kopiert' : 'Raum-Link kopieren'}</button>
                       </section>
                       <section className="obs-output-card" aria-label="OBS-Quelle Livestream">
                         <div className="obs-output-heading"><strong>2 · Livestream / Kamera</strong><span>Nur Deutsch unten</span></div>
@@ -1191,12 +1215,14 @@ export default function App() {
                         </label>
                         <label htmlFor="obs-stream-url">OBS-Link Livestream</label>
                         <input id="obs-stream-url" className="obs-export-url" readOnly value={obsStreamUrl} onFocus={(e) => e.currentTarget.select()} />
-                        <button type="button" className="open-projector" onClick={() => handleCopyObsLink('stream', obsStreamUrl)}><Copy size={16} /> {obsCopied === 'stream' ? 'Livestream-Link kopiert' : 'Livestream-Link kopieren'}</button>
+                        <button type="button" className="open-projector" onClick={async () => {
+                          const ok = await window.khutbah.copyObsUrl(obsStreamUrl);
+                          setObsCopied(ok ? 'stream' : null);
+                        }}><Copy size={16} /> {obsCopied === 'stream' ? 'Livestream-Link kopiert' : 'Livestream-Link kopieren'}</button>
                       </section>
                     </div>
-                    {obsCopyError && <p className="obs-export-error">{obsCopyError}</p>}
                     <p className="obs-export-hint">In OBS für jede Ausgabe eine eigene Browserquelle anlegen und den jeweiligen Link einfügen. Vorhandene Livestream-Quellen nach diesem Update mit dem neuen Link aktualisieren. Für Full-HD je 1920 × 1080 einstellen. Die Livestream-Quelle über der Kamera platzieren. Nach Änderungen an OBS-Reglern den entsprechenden Link erneut kopieren und in OBS aktualisieren.</p>
-                    <p className="obs-export-hint">Khutbah AI muss laufen. Der Link bleibt auch nach einem Neustart gleich (fester Port); nur wenn der Port belegt ist, ändert er sich. Die Beamer-Einstellungen beeinflussen nur die Raumquelle, nicht die Film-Untertitel.</p>
+                    <p className="obs-export-hint">Khutbah AI muss laufen. Nach einem Neustart kann sich der lokale Port ändern; dann beide Links neu kopieren. Die Beamer-Einstellungen beeinflussen nur die Raumquelle, nicht die Film-Untertitel.</p>
                   </>
                 ) : (
                   <p className="obs-export-error">OBS-Ausgabe nicht verfügbar: {obsError ?? 'Verbindung wird vorbereitet.'}</p>
@@ -1329,6 +1355,33 @@ export default function App() {
               </div>
             </section>
           </>
+        ) : activeTab === 'test' ? (
+          <section className="panel" style={{ marginTop: 16, padding: 30 }}>
+            <span className="section-kicker">AUTOMATISCHE GITHUB-UPDATES</span>
+            <h2 style={{ marginTop: 12 }}>Khutbah AI · Version {updateStatus?.version ?? '1.1.11'}</h2>
+            <div style={{ padding: 16, marginTop: 16, borderRadius: 10, border: '2px solid #d4af37', color: '#f3da94', background: 'rgba(212, 175, 55, 0.14)', fontWeight: 800, fontSize: 20 }}>
+              TEST-BUILD 1.1.11 · NEUE OBERFLÄCHE
+            </div>
+            <p style={{ fontSize: 17, lineHeight: 1.6, maxWidth: 760 }}>
+              Updates werden beim Start und anschließend regelmäßig automatisch geprüft und heruntergeladen.
+              Die Installation erfolgt erst beim regulären Beenden, damit die Predigt nicht unterbrochen wird.
+            </p>
+            <div style={{ background: 'rgba(212,175,55,.09)', border: '1px solid rgba(212,175,55,.38)', borderRadius: 12, padding: 20, marginTop: 18 }}>
+              <strong style={{ color: '#e8c35b', fontSize: 21 }}>UPDATE-SYSTEM AKTIV · v{updateStatus?.version ?? '1.1.11'}</strong>
+              <p style={{ marginTop: 12, fontSize: 17 }}>{updateStatus?.message ?? 'Update-Status wird geladen …'}</p>
+              {updateStatus?.availableVersion && <p>Neue Version: {updateStatus.availableVersion}</p>}
+              {updateStatus?.progress !== null && updateStatus?.progress !== undefined && (
+                <progress aria-label="Update-Download" max={100} value={updateStatus.progress} style={{ width: '100%', height: 15, accentColor: '#d4af37' }} />
+              )}
+              {updateStatus?.installOnQuit && (
+                <p style={{ color: '#e8c35b', fontWeight: 700 }}>Download abgeschlossen. Schließe die App nach der Predigt normal; beim nächsten Start ist die neue Version installiert.</p>
+              )}
+              <button type="button" style={{ marginTop: 12, background: 'rgba(212,175,55,.18)', color: '#f3da94', border: '1px solid #8c7334', borderRadius: 8, padding: '10px 16px', display: 'inline-flex', alignItems: 'center', gap: 9, cursor: 'pointer' }} onClick={() => void checkUpdatesNow()} disabled={updateCheckBusy || updateStatus?.phase === 'downloading' || updateStatus?.installOnQuit}>
+                <RefreshCw size={16} /> {updateCheckBusy ? 'Prüfe …' : 'Jetzt nach Updates suchen'}
+              </button>
+            </div>
+            <p style={{ marginTop: 16, opacity: .75 }}>GitHub: Smartboy1337 / Khutba-Ki-V2. Auf dem Moschee-PC ist keine PowerShell erforderlich.</p>
+          </section>
         ) : (
           /* Tab 2: Einstellungen */
           <>

@@ -1,0 +1,25 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const pkg = require(path.join(root, 'package.json'));
+const lock = require(path.join(root, 'package-lock.json'));
+const version = pkg.version;
+const marker = 'TEST-BUILD 1.1.11';
+if (version !== '1.1.11') throw new Error('Dieses Testrelease muss Version 1.1.11 haben.');
+const fail = (message) => { console.error('RELEASE-FEHLER:', message); process.exitCode = 1; };
+if (lock.version !== version || lock.packages[''].version !== version) fail('package-lock.json und package.json stimmen nicht überein.');
+const appSource = fs.readFileSync(path.join(root, 'src/renderer/src/ui/App.tsx'), 'utf8');
+if (!appSource.includes(marker)) fail('Sichtbarer Testtext fehlt im Quellcode.');
+if (!appSource.includes('UPDATE-SYSTEM AKTIV')) fail('Sichtbare Versionsanzeige fehlt im App.tsx-Quellcode.');
+const assetDir = path.join(root,'out/renderer/assets');
+const assetFiles = fs.existsSync(assetDir) ? fs.readdirSync(assetDir).filter(x=>x.endsWith('.js')) : [];
+if (!assetFiles.some(x=>fs.readFileSync(path.join(assetDir,x),'utf8').includes(marker))) fail('Die gebaute Benutzeroberfläche enthält den v1.1.11-Testtext nicht.');
+const dist=path.join(root,'dist-exe');
+const yml=path.join(dist,'latest.yml');
+if (!fs.existsSync(yml)) fail('latest.yml fehlt');
+else if (!new RegExp('^version:\\s*["\\\']?'+version.replace(/\./g,'\\.')+'["\\\']?\\s*$','m').test(fs.readFileSync(yml,'utf8'))) fail('latest.yml enthält nicht Version '+version);
+const exe=`Khutbah-AI-${version}-x64.exe`;
+if (!fs.existsSync(path.join(dist,exe))) fail('Installer fehlt: '+exe);
+if (!fs.existsSync(path.join(dist,exe+'.blockmap'))) fail('Blockmap fehlt: '+exe+'.blockmap');
+if (!process.exitCode) { console.log('RELEASE GEPRÜFT: Version',version,'+ GUI + Setup + latest.yml + blockmap'); console.log('Dateien für GitHub Releases:', exe, exe+'.blockmap', 'latest.yml'); }

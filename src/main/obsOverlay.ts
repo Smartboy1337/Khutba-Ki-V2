@@ -22,8 +22,6 @@ export interface ObsPayload {
 }
 
 // OBS needs text and presentation options only. Never send Google credentials or settings.
-export const DEFAULT_OBS_PORT = 47811;
-
 const initialPayload: ObsPayload = {
   blocks: [],
   mode: 'both',
@@ -42,15 +40,9 @@ export class ObsOverlayServer {
   private clients = new Set<ServerResponse>();
   private heartbeat: NodeJS.Timeout | null = null;
   private current: ObsPayload = initialPayload;
-  private currentMessage = JSON.stringify(initialPayload);
   private url: string | null = null;
 
-  /**
-   * Startet den lokalen OBS-Server. Es wird ein FESTER Port bevorzugt, damit die in OBS
-   * eingetragenen Links auch nach einem Neustart des Programms weiter funktionieren.
-   * Nur wenn der Port belegt ist, wird ein freier Port gewählt.
-   */
-  async start(preferredPort: number = DEFAULT_OBS_PORT): Promise<string> {
+  async start(): Promise<string> {
     if (this.url) return this.url;
     if (this.server) throw new Error('OBS-Server wird bereits gestartet.');
 
@@ -59,8 +51,6 @@ export class ObsOverlayServer {
       // Node listens ONLY on loopback. No external network exposure.
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Cache-Control', 'no-store');
-      // Nur der Event-Stream bleibt offen; alle anderen Antworten schließen die Verbindung.
-      if (path !== '/events') res.setHeader('Connection', 'close');
       if (req.method !== 'GET') {
         res.writeHead(405).end();
         return;
@@ -79,10 +69,7 @@ export class ObsOverlayServer {
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         res.setHeader('Connection', 'keep-alive');
         res.writeHead(200);
-        req.socket.setNoDelay(true);
-        req.socket.setKeepAlive(true);
-        // retry: Browser verbindet sich nach Abbruch nach 1 s automatisch neu.
-        res.write(`retry: 1000\ndata: ${this.currentMessage}\n\n`);
+        res.write(`data: ${JSON.stringify(this.current)}\n\n`);
         this.clients.add(res);
         res.on('close', () => this.clients.delete(res));
         return;
@@ -90,29 +77,14 @@ export class ObsOverlayServer {
       res.writeHead(404).end('Not found');
     });
     this.server = server;
-    server.keepAliveTimeout = 65000;
-    const listen = (port: number) =>
-      new Promise<void>((resolve, reject) => {
-        const onError = (error: Error) => {
-          server.removeListener('listening', onListening);
-          reject(error);
-        };
-        const onListening = () => {
-          server.removeListener('error', onError);
-          resolve();
-        };
-        server.once('error', onError);
-        server.once('listening', onListening);
-        server.listen(port, '127.0.0.1');
-      });
     try {
-      try {
-        await listen(preferredPort);
-      } catch (error) {
-        if (preferredPort === 0) throw error;
-        // Fester Port belegt (z. B. zweites Programm) -> beliebiger freier Port.
-        await listen(0);
-      }
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+          server.removeListener('error', reject);
+          resolve();
+        });
+      });
     } catch (error) {
       this.server = null;
       server.close();
@@ -143,24 +115,16 @@ export class ObsOverlayServer {
       mode: ['de','ar','both'].includes(payload.mode) ? payload.mode : 'de',
       visibleBlockCount: Number.isFinite(payload.visibleBlockCount) ? Math.max(1,Math.min(12,Math.round(payload.visibleBlockCount!))) : 5,
       maxWidthPercent: Number.isFinite(payload.maxWidthPercent) ? Math.max(40,Math.min(100,payload.maxWidthPercent)) : 92,
-      fontSizeDe: Number(payload.fontSizeDe) || 34,
-      fontSizeAr: Number(payload.fontSizeAr) || 42,
-      lineHeight: Number(payload.lineHeight) || 1.55,
-      textAlign: ['left','center','right'].includes(payload.textAlign) ? payload.textAlign : 'center',
-      textColor: String(payload.textColor ?? '#F5F2EB').slice(0, 20),
-      arabicColor: String(payload.arabicColor ?? '#F7D774').slice(0, 20)
+      fontSizeDe: payload.fontSizeDe,
+      fontSizeAr: payload.fontSizeAr,
+      lineHeight: payload.lineHeight,
+      textAlign: payload.textAlign,
+      textColor: payload.textColor,
+      arabicColor: payload.arabicColor
     };
-    const json = JSON.stringify(this.current);
-    // Unveränderte Daten nicht erneut an OBS senden (spart Neuzeichnen).
-    if (json === this.currentMessage) return;
-    this.currentMessage = json;
-    const message = `data: ${json}\n\n`;
+    const message = `data: ${JSON.stringify(this.current)}\n\n`;
     for (const client of this.clients) {
-      if (client.destroyed || client.writableEnded) {
-        this.clients.delete(client);
-        continue;
-      }
-      client.write(message);
+      if (!client.destroyed) client.write(message);
     }
   }
 
@@ -169,7 +133,6 @@ export class ObsOverlayServer {
     this.heartbeat = null;
     for (const client of this.clients) client.end();
     this.clients.clear();
-    this.server?.closeAllConnections?.();
     this.server?.close();
     this.server = null;
     this.url = null;
@@ -308,22 +271,8 @@ const OBS_PAGE = String.raw`<!doctype html>
     });
     content.replaceChildren(frag);
   }
-  // Robuste Verbindung: Bei Abbruch (Programm-Neustart, Standby) automatisch neu verbinden.
-  let stream = null;
-  let lastData = '';
-  function connect() {
-    if (stream) { try { stream.close(); } catch {} }
-    stream = new EventSource('/events');
-    stream.onmessage = e => {
-      if (e.data === lastData) return;
-      lastData = e.data;
-      try { render(JSON.parse(e.data)); } catch { /* Ignore invalid packets. */ }
-    };
-    stream.onerror = () => {
-      if (stream && stream.readyState === EventSource.CLOSED) setTimeout(connect, 2000);
-    };
-  }
-  connect();
+  const stream = new EventSource('/events');
+  stream.onmessage = e => { try { render(JSON.parse(e.data)); } catch { /* Ignore invalid packets. */ } };
 })();
 </script>
 </body></html>`;

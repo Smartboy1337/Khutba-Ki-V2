@@ -28,6 +28,16 @@ export interface ProjectorPayload {
   backgroundColor: string;
 }
 
+export interface UpdateStatus {
+  version: string;
+  phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'development';
+  message: string;
+  progress: number | null;
+  availableVersion: string | null;
+  lastCheckedAt: string | null;
+  installOnQuit: boolean;
+}
+
 export interface DisplayItem {
   id: number;
   label: string;
@@ -55,8 +65,11 @@ export interface PipelineSegmentResult {
 declare global {
 interface Window {
   khutbah: {
+    getUpdateStatus: () => Promise<UpdateStatus>;
+    checkForUpdates: () => Promise<UpdateStatus>;
+    onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
     getObsUrl: () => Promise<{ url: string | null; error: string | null }>;
-    copyObsUrl: (url?: string) => Promise<string | false>;
+    copyObsUrl: (url?: string) => Promise<boolean>;
     listDisplays: () => Promise<DisplayItem[]>;
     openProjector: (displayId?: number) => Promise<boolean>;
     closeProjector: () => Promise<boolean>;
@@ -69,8 +82,6 @@ interface Window {
 
     loadSettings: () => Promise<AppCloudSettings>;
     saveSettings: (settings: AppCloudSettings) => Promise<boolean>;
-    updateSettings: (settings: Partial<Omit<AppCloudSettings, 'apiKey'>>) => Promise<boolean>;
-    setKeepAwake: (active: boolean) => Promise<boolean>;
     verifyApiKey: (apiKey: string) => Promise<{ ok: boolean; message: string }>;
     processAudioSegment: (
       wavArrayBuffer: ArrayBuffer,
