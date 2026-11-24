@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const updater = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'khutbahAutoUpdater.ts'), 'utf8');
+const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'auto-update-einrichten.cjs'), 'utf8');
+assert.match(updater, /!app\.isPackaged/);
+assert.match(updater, /autoUpdater\.autoInstallOnAppQuit = true/);
+assert.doesNotMatch(updater, /quitAndInstall\(/);
+assert.match(installer, /KHUTBAH_AUTO_UPDATE_HOOK/);
+assert.match(installer, /target: 'nsis'/);
+assert.match(installer, /electron-updater/);
+assert.match(installer, /backup-vor-auto-update-/);
+console.log('Auto-Update Basispruefungen: OK');
