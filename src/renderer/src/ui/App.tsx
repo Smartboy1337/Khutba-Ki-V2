@@ -82,6 +82,7 @@ export default function App() {
   // Echtzeit-Geschwindigkeit & Mehrzeilen-Anzeige
   const [visibleBlockCount, setVisibleBlockCount] = useState<number>(5);
   const [chunkIntervalMs, setChunkIntervalMs] = useState<number>(1200);
+  const [finalSegmentMs, setFinalSegmentMs] = useState<number>(5500);
 
   // Google Cloud Einstellungen
   const [apiKey, setApiKey] = useState<string>('');
@@ -296,6 +297,7 @@ export default function App() {
 
   const audio = useAudioMonitor({
     chunkIntervalMs,
+    finalSegmentMs,
     onSpeechPacketReady: handleSpeechPacketReady
   });
 
@@ -315,6 +317,7 @@ export default function App() {
         setCustomGlossary(s.customGlossary ?? []);
         if (s.visibleBlockCount) setVisibleBlockCount(s.visibleBlockCount);
         if (s.chunkIntervalMs) setChunkIntervalMs(s.chunkIntervalMs);
+        if (s.finalSegmentMs) setFinalSegmentMs(s.finalSegmentMs);
       })
       .catch(() => {});
   }, [isProjector]);
@@ -563,7 +566,8 @@ export default function App() {
         enableIslamicGlossary,
         customGlossary,
         visibleBlockCount,
-        chunkIntervalMs
+        chunkIntervalMs,
+        finalSegmentMs
       });
       const res = await window.khutbah.verifyApiKey(apiKey.trim());
       setKeyVerifyStatus(res);
@@ -679,8 +683,8 @@ export default function App() {
               <small>Audio nur im RAM · Keine Speicherung</small>
             </div>
           </div>
-          <small className="version">KHUTBAH AI · v{updateStatus?.version ?? '1.1.11'} · AUTO-UPDATE</small>
-          <small style={{ color: '#e8c35b', fontWeight: 700 }}>TEST-BUILD 1.1.11 · NEUE OBERFLÄCHE</small>
+          <small className="version">KHUTBAH AI · v{updateStatus?.version ?? '1.1.12'} · AUTO-UPDATE</small>
+          <small style={{ color: '#e8c35b', fontWeight: 700 }}>TEMPO EINSTELLBAR · v1.1.12</small>
           {updateStatus?.installOnQuit && <small style={{ color: '#d4af37' }}>Update bereit – beim Beenden installieren</small>}
         </div>
       </aside>
@@ -1066,6 +1070,16 @@ export default function App() {
                   </div>
                   <div>
                     <div className="meter-head" style={{ margin: '0 0 4px' }}>
+                      <span>SATZABSCHLUSS (TEMPO)</span>
+                      <span className="db">{(finalSegmentMs / 1000).toFixed(1)} Sek.</span>
+                    </div>
+                    <input type="range" min={3500} max={8500} step={500}
+                      value={finalSegmentMs}
+                      onChange={(e) => setFinalSegmentMs(Number(e.target.value))}
+                      style={{ width: '100%', accentColor: '#d4af37' }} />
+                  </div>
+                  <div>
+                    <div className="meter-head" style={{ margin: '0 0 4px' }}>
                       <span>ABSÄTZE AUF BEAMER</span>
                       <span className="db">{visibleBlockCount} Blöcke</span>
                     </div>
@@ -1358,16 +1372,16 @@ export default function App() {
         ) : activeTab === 'test' ? (
           <section className="panel" style={{ marginTop: 16, padding: 30 }}>
             <span className="section-kicker">AUTOMATISCHE GITHUB-UPDATES</span>
-            <h2 style={{ marginTop: 12 }}>Khutbah AI · Version {updateStatus?.version ?? '1.1.11'}</h2>
+            <h2 style={{ marginTop: 12 }}>Khutbah AI · Version {updateStatus?.version ?? '1.1.12'}</h2>
             <div style={{ padding: 16, marginTop: 16, borderRadius: 10, border: '2px solid #d4af37', color: '#f3da94', background: 'rgba(212, 175, 55, 0.14)', fontWeight: 800, fontSize: 20 }}>
-              TEST-BUILD 1.1.11 · NEUE OBERFLÄCHE
+              TEMPO EINSTELLBAR · v1.1.12
             </div>
             <p style={{ fontSize: 17, lineHeight: 1.6, maxWidth: 760 }}>
               Updates werden beim Start und anschließend regelmäßig automatisch geprüft und heruntergeladen.
               Die Installation erfolgt erst beim regulären Beenden, damit die Predigt nicht unterbrochen wird.
             </p>
             <div style={{ background: 'rgba(212,175,55,.09)', border: '1px solid rgba(212,175,55,.38)', borderRadius: 12, padding: 20, marginTop: 18 }}>
-              <strong style={{ color: '#e8c35b', fontSize: 21 }}>UPDATE-SYSTEM AKTIV · v{updateStatus?.version ?? '1.1.11'}</strong>
+              <strong style={{ color: '#e8c35b', fontSize: 21 }}>UPDATE-SYSTEM AKTIV · v{updateStatus?.version ?? '1.1.12'}</strong>
               <p style={{ marginTop: 12, fontSize: 17 }}>{updateStatus?.message ?? 'Update-Status wird geladen …'}</p>
               {updateStatus?.availableVersion && <p>Neue Version: {updateStatus.availableVersion}</p>}
               {updateStatus?.progress !== null && updateStatus?.progress !== undefined && (
@@ -1552,6 +1566,17 @@ export default function App() {
                     onChange={(e) => setChunkIntervalMs(Number(e.target.value))}
                     style={{ width: '100%', accentColor: '#d4af37' }}
                   />
+                </div>
+
+                <div>
+                  <label className="field-label">SATZABSCHLUSS / GESCHWINDIGKEIT: {(finalSegmentMs / 1000).toFixed(1)} SEKUNDEN</label>
+                  <input type="range" min={3500} max={8500} step={500}
+                    value={finalSegmentMs}
+                    onChange={(e) => setFinalSegmentMs(Number(e.target.value))}
+                    style={{ width: '100%', accentColor: '#d4af37' }} />
+                  <small style={{ display: 'block', opacity: .75 }}>
+                    Schnell: 3,5–4,5 s · Ausgewogen: 5,5 s · Mehr Kontext: 7–8,5 s. Kurze Werte können Wörter abschneiden.
+                  </small>
                 </div>
 
                 <div>

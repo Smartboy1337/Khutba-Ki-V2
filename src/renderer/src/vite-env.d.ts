@@ -53,6 +53,7 @@ export interface AppCloudSettings {
   customGlossary: GlossaryRule[];
   visibleBlockCount: number;
   chunkIntervalMs: number;
+  finalSegmentMs: number;
 }
 
 export interface PipelineSegmentResult {

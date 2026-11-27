@@ -17,22 +17,34 @@ export const SEGMENT_POLICY = Object.freeze({
   forcedOverlapMs: 180
 });
 
+/** Einstellbarer Zeitpunkt des spaetesten Satzabschlusses (Live-Regler). */
+export function getSegmentPolicy(finalSegmentMs: number = 5500) {
+  const maximumMs = Math.max(3500, Math.min(8500, Math.round(finalSegmentMs / 500) * 500));
+  return {
+    ...SEGMENT_POLICY,
+    trailingSilenceMs: 500,
+    // Bereits 900 ms vor der Grenze kann eine kurze Atempause genutzt werden.
+    softMaxUtteranceMs: Math.max(SEGMENT_POLICY.minUtteranceMs, maximumMs - 900),
+    hardMaxUtteranceMs: maximumMs
+  };
+}
+
 export type SpeechBoundary = 'continue' | 'natural-pause' | 'max-duration';
 
 /** Zeiten sind Millisekunden, inklusive der tatsächlichen Stille im Puffer. */
-export function decideSpeechBoundary(durationMs: number, silenceMs: number): SpeechBoundary {
+export function decideSpeechBoundary(durationMs: number, silenceMs: number, policy: typeof SEGMENT_POLICY | ReturnType<typeof getSegmentPolicy> = SEGMENT_POLICY): SpeechBoundary {
   if (!Number.isFinite(durationMs) || !Number.isFinite(silenceMs)) return 'continue';
-  if (durationMs < SEGMENT_POLICY.minUtteranceMs) return 'continue';
+  if (durationMs < policy.minUtteranceMs) return 'continue';
 
   // Ein normal abgeschlossener Satz hat Vorrang vor einem harten Schnitt.
-  if (silenceMs >= SEGMENT_POLICY.trailingSilenceMs) return 'natural-pause';
+  if (silenceMs >= policy.trailingSilenceMs) return 'natural-pause';
 
   // Bei längerer Rede nur in einer nachgewiesenen kurzen Pause schneiden.
-  if (durationMs >= SEGMENT_POLICY.softMaxUtteranceMs &&
-      silenceMs >= SEGMENT_POLICY.shortPauseAfterSoftLimitMs) return 'natural-pause';
+  if (durationMs >= policy.softMaxUtteranceMs &&
+      silenceMs >= policy.shortPauseAfterSoftLimitMs) return 'natural-pause';
 
   // Wenn der Sprecher gar nicht pausiert, muss die synchrone API begrenzt bleiben.
-  if (durationMs >= SEGMENT_POLICY.hardMaxUtteranceMs) return 'max-duration';
+  if (durationMs >= policy.hardMaxUtteranceMs) return 'max-duration';
   return 'continue';
 }
 

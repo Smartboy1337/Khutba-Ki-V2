@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { analyzeTimeDomainSamples, encodeFloat32To16kWav } from './audioMetrics';
-import { SEGMENT_POLICY, decideSpeechBoundary, retainAudioTail } from './speechBoundary';
+import { SEGMENT_POLICY, getSegmentPolicy, decideSpeechBoundary, retainAudioTail } from './speechBoundary';
 
 export interface AudioDeviceOption {
   deviceId: string;
@@ -17,6 +17,7 @@ export type InputProfile = 'headset' | 'mosque-mic';
 
 export interface UseAudioMonitorOptions {
   chunkIntervalMs?: number;
+  finalSegmentMs?: number;
   onSpeechPacketReady?: (packet: SpeechChunkPacket) => void;
 }
 
@@ -52,6 +53,7 @@ export function useAudioMonitor(options?: UseAudioMonitorOptions) {
   const autoGainEnabledRef = useRef<boolean>(autoGainEnabled);
   const thresholdDbRef = useRef<number>(thresholdDb);
   const chunkIntervalMsRef = useRef<number>(options?.chunkIntervalMs ?? 1100);
+  const segmentPolicyRef = useRef(getSegmentPolicy(options?.finalSegmentMs));
   const testTimerRef = useRef<number | null>(null);
 
   const isCapturingSpeechRef = useRef<boolean>(false);
@@ -71,6 +73,10 @@ export function useAudioMonitor(options?: UseAudioMonitorOptions) {
   useEffect(() => {
     chunkIntervalMsRef.current = Math.max(750, Math.min(3000, options?.chunkIntervalMs ?? 1100));
   }, [options?.chunkIntervalMs]);
+
+  useEffect(() => {
+    segmentPolicyRef.current = getSegmentPolicy(options?.finalSegmentMs);
+  }, [options?.finalSegmentMs]);
 
   useEffect(() => {
     thresholdDbRef.current = thresholdDb;
@@ -297,7 +303,7 @@ export function useAudioMonitor(options?: UseAudioMonitorOptions) {
           // Nach dem weichen Zeitlimit nicht mitten im Wort trennen.
           // Erst an einer kurzen Sprechpause oder spätestens an der harten Grenze.
           // Zwischenübersetzungen werden wie bisher im eingestellten Takt gesendet.
-          const boundary = decideSpeechBoundary(utteranceDurationMsRef.current, silenceMsRef.current);
+          const boundary = decideSpeechBoundary(utteranceDurationMsRef.current, silenceMsRef.current, segmentPolicyRef.current);
 
           if (boundary !== 'continue') {
             const wav = encodeFloat32To16kWav(utteranceChunksRef.current, ctx.sampleRate, {

@@ -1,6 +1,6 @@
 {
   "name": "khutbah-ai",
-  "version": "1.1.11",
+  "version": "1.1.12",
   "private": true,
   "description": "Khutbah AI - Moschee Al Badr Edition (Ultra-Fast Live Arabic-to-German Sermon Translation)",
   "main": "out/main/index.js",

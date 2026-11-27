@@ -16557,7 +16557,8 @@ function loadSettings() {
       enableIslamicGlossary: true,
       customGlossary: DEFAULT_ISLAMIC_GLOSSARY,
       visibleBlockCount: 5,
-      chunkIntervalMs: 1200
+      chunkIntervalMs: 1200,
+      finalSegmentMs: 5500
     };
   }
   try {
@@ -16574,7 +16575,8 @@ function loadSettings() {
       enableIslamicGlossary: raw.enableIslamicGlossary ?? true,
       customGlossary: raw.customGlossary ?? DEFAULT_ISLAMIC_GLOSSARY,
       visibleBlockCount: raw.visibleBlockCount ?? 5,
-      chunkIntervalMs: raw.chunkIntervalMs ?? 1200
+      chunkIntervalMs: raw.chunkIntervalMs ?? 1200,
+      finalSegmentMs: raw.finalSegmentMs ?? 5500
     };
   } catch {
     return {
@@ -16583,7 +16585,8 @@ function loadSettings() {
       enableIslamicGlossary: true,
       customGlossary: DEFAULT_ISLAMIC_GLOSSARY,
       visibleBlockCount: 5,
-      chunkIntervalMs: 1200
+      chunkIntervalMs: 1200,
+      finalSegmentMs: 5500
     };
   }
 }
@@ -16594,7 +16597,8 @@ function saveSettings(input) {
     enableIslamicGlossary: input.enableIslamicGlossary,
     customGlossary: input.customGlossary,
     visibleBlockCount: input.visibleBlockCount ?? 5,
-    chunkIntervalMs: input.chunkIntervalMs ?? 1200
+    chunkIntervalMs: input.chunkIntervalMs ?? 1200,
+    finalSegmentMs: Math.max(3500, Math.min(8500, input.finalSegmentMs ?? 5500))
   };
   if (input.apiKey.trim()) {
     if (require$$1$3.safeStorage.isEncryptionAvailable()) {
